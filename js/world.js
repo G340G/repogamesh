@@ -357,4 +357,101 @@ export class World{
     });
   }
 
-  _addBeaconHouse(x,y,z){_
+  _addBeaconHouse(x,y,z){
+    // a distinct “manor” silhouette
+    const w=12, h=7.5, d=9;
+    const mat = new THREE.MeshStandardMaterial({ map:this.assets.wallTex, roughness:0.95, color:0x6f5b3e });
+    const base = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    base.position.set(x, h/2, z);
+    base.castShadow = true; base.receiveShadow=true;
+
+    const roof = new THREE.Mesh(
+      new THREE.ConeGeometry(8, 4.2, 4),
+      new THREE.MeshStandardMaterial({ color:0x2a2320, roughness:1.0 })
+    );
+    roof.position.set(0, h/2 + 2.1, 0);
+    roof.rotation.y = Math.PI/4;
+    roof.castShadow = true;
+    base.add(roof);
+
+    // faint interior light to pull player
+    const inner = new THREE.PointLight(0xffd7a0, 0.7, 18, 2.0);
+    inner.position.set(x+1.2, 2.2, z-1.3);
+    this.scene.add(inner);
+
+    this.scene.add(base);
+
+    this.interactables.push({
+      mesh: base,
+      kind: "beacon",
+      data: { reached:false }
+    });
+  }
+
+  _addFogCurtain(){
+    // invisible boundary helper: nothing rendered, but we clamp player to bounds
+  }
+
+  projectToTownBounds(v){
+    const r = this.size * 0.92;
+    const len = Math.hypot(v.x, v.z);
+    if (len > r){
+      const s = r / len;
+      v.x *= s; v.z *= s;
+    }
+  }
+
+  raycastInteract(camera, raycaster){
+    raycaster.setFromCamera({ x:0, y:0 }, camera);
+    const meshes = this.interactables.map(i => i.mesh);
+    const hits = raycaster.intersectObjects(meshes, true);
+    if (!hits.length) return null;
+
+    // find top-level interactable (walk up parent chain)
+    const hitObj = hits[0].object;
+    let found = null;
+    for (const it of this.interactables){
+      if (it.mesh === hitObj || it.mesh.children.includes(hitObj) || it.mesh === hitObj.parent || it.mesh === hitObj.parent?.parent){
+        found = it; break;
+      }
+      // fallback: check ancestry
+      let p = hitObj.parent;
+      while (p){
+        if (p === it.mesh){ found = it; break; }
+        p = p.parent;
+      }
+      if (found) break;
+    }
+    return found;
+  }
+}
+
+function wrapText(ctx, text, x, y, maxWidth, lineHeight){
+  const words = text.split(" ");
+  let line = "";
+  for (let n=0;n<words.length;n++){
+    const testLine = line + words[n] + " ";
+    const w = ctx.measureText(testLine).width;
+    if (w > maxWidth && n > 0){
+      ctx.fillText(line, x, y);
+      line = words[n] + " ";
+      y += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  ctx.fillText(line, x, y);
+}
+
+function canvasNoisePattern(){
+  const c = document.createElement("canvas");
+  c.width=64; c.height=64;
+  const g = c.getContext("2d");
+  g.fillStyle = "#0f0d0b"; g.fillRect(0,0,64,64);
+  for (let i=0;i<650;i++){
+    const a = Math.random()*0.12;
+    g.fillStyle = `rgba(230,215,180,${a})`;
+    g.fillRect(Math.random()*64, Math.random()*64, 1, 1);
+  }
+  return c;
+}
