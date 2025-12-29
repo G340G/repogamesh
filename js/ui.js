@@ -1,138 +1,77 @@
 import { clamp } from "./utils.js";
 
-export class UI{
-  constructor(state){
-    this.state = state;
-
-    this.boot = document.getElementById("boot");
-    this.end = document.getElementById("end");
-    this.endText = document.getElementById("endText");
-
-    this.dialogue = document.getElementById("dialogue");
-    this.dlgName = document.getElementById("dlgName");
-    this.dlgText = document.getElementById("dlgText");
-    this.dlgChoices = document.getElementById("dlgChoices");
-    this.dlgFooter = document.getElementById("dlgFooter");
-
-    this.hint = document.getElementById("hint");
-    this.status = document.getElementById("status");
-    this.objective = document.getElementById("objective");
+export class UI {
+  constructor(){
+    this.prompt = document.getElementById("prompt");
+    this.promptText = document.getElementById("promptText");
+    this.objectiveText = document.getElementById("objectiveText");
 
     this.journal = document.getElementById("journal");
-    this.journalObjectives = document.getElementById("journalObjectives");
+    this.journalBody = document.getElementById("journalBody");
     this.journalTheme = document.getElementById("journalTheme");
-    this.journalNotes = document.getElementById("journalNotes");
 
-    this.acc = document.getElementById("accessibility");
-    this.sens = document.getElementById("sens");
-    this.fog = document.getElementById("fog");
-    this.grain = document.getElementById("grain");
-    this.vignette = document.getElementById("vignette");
+    this.hint = document.getElementById("hint");
 
-    this.grainLayer = document.getElementById("grainLayer");
-    this.vignetteLayer = document.getElementById("vignetteLayer");
+    this._signal = 0;
+    this._danger = 0;
 
-    this.breathFill = document.getElementById("breathFill");
-    this.fearFill = document.getElementById("fearFill");
-
-    this._choiceHandler = null;
+    this._pulseT = 0;
+    this._lastFlash = 0;
   }
 
-  setBootVisible(v){ this.boot.classList.toggle("hidden", !v); }
-  setEndVisible(v){ this.end.classList.toggle("hidden", !v); }
-
-  setHint(text){ this.hint.textContent = text || ""; }
-  setStatus(text){ this.status.textContent = text || ""; }
-  setObjective(text){ this.objective.textContent = text || ""; }
-
-  showDialogue(node){
-    this.dialogue.classList.remove("hidden");
-    this.dlgName.textContent = node.name || "";
-    this.dlgText.textContent = node.text || "";
-    this.dlgChoices.innerHTML = "";
-
-    if (this._choiceHandler) this._choiceHandler = null;
-
-    if (node.choices && node.choices.length){
-      node.choices.forEach(c => {
-        const b = document.createElement("button");
-        b.className = "choice";
-        b.textContent = c.label;
-        b.onclick = () => {
-          if (this._choiceHandler) this._choiceHandler(c.key);
-        };
-        this.dlgChoices.appendChild(b);
-      });
-      this.dlgFooter.textContent = "Choose";
-    } else {
-      this.dlgFooter.textContent = "[E] advance";
-    }
+  setObjective(text){
+    this.objectiveText.textContent = text;
   }
 
-  onChoice(handler){
-    this._choiceHandler = handler;
+  showPrompt(text){
+    this.promptText.textContent = text;
+    this.prompt.classList.remove("hidden");
   }
 
-  hideDialogue(){
-    this.dialogue.classList.add("hidden");
-    this.dlgChoices.innerHTML = "";
-    this._choiceHandler = null;
+  hidePrompt(){
+    this.prompt.classList.add("hidden");
   }
 
-  toggleJournal(v){
-    const show = (v ?? this.journal.classList.contains("hidden"));
-    this.journal.classList.toggle("hidden", !show);
+  flashPrompt(text){
+    this.showPrompt(text);
+    clearTimeout(this._flashTimer);
+    this._flashTimer = setTimeout(()=> this.hidePrompt(), 1500);
   }
 
-  toggleAccessibility(v){
-    const show = (v ?? this.acc.classList.contains("hidden"));
-    this.acc.classList.toggle("hidden", !show);
+  toggleJournal(){
+    this.journal.classList.toggle("hidden");
   }
 
-  updateJournal(state){
-    // objectives
-    this.journalObjectives.innerHTML = "";
-    state.objectives.forEach(o => {
-      const div = document.createElement("div");
-      div.className = "note";
-      div.innerHTML = `<div class="note-title">${o.done ? "✓" : "•"} ${escapeHtml(o.text)}</div>`;
-      this.journalObjectives.appendChild(div);
-    });
-
-    // theme fragments
-    this.journalTheme.textContent = state.themeFragments.join("\n\n");
-
-    // notes
-    this.journalNotes.innerHTML = "";
-    state.notes.slice().reverse().forEach(n => {
-      const wrap = document.createElement("div");
-      wrap.className = "note";
-      wrap.innerHTML = `
-        <div class="note-title">${escapeHtml(n.title)}</div>
-        <div class="note-body">${escapeHtml(n.body)}</div>
-      `;
-      this.journalNotes.appendChild(wrap);
-    });
+  setJournalTheme(theme){
+    this.journalTheme.textContent = `Theme: ${theme}`;
   }
 
-  setPostFX({ grain=0.6, vignette=0.7 } = {}){
-    this.grainLayer.style.opacity = String(clamp(grain, 0, 1));
-    this.vignetteLayer.style.opacity = String(clamp(vignette, 0, 1));
+  appendJournal(text){
+    this.journalBody.textContent += text;
+    this.journal.scrollTop = this.journal.scrollHeight;
   }
 
-  setMeters({ breath=1, fear=0 }){
-    this.breathFill.style.width = `${clamp(breath,0,1)*100}%`;
-    this.fearFill.style.width = `${clamp(fear,0,1)*100}%`;
-  }
+  setSignal(signal, danger){
+    this._signal = clamp(signal, 0, 1);
+    this._danger = clamp(danger, 0, 1);
 
-  showEnd(text){
-    this.endText.textContent = text;
-    this.setEndVisible(true);
+    // reflect in hint text subtly
+    const sigWord =
+      this._signal < 0.25 ? "WEAK" :
+      this._signal < 0.55 ? "STABLE" :
+      this._signal < 0.85 ? "STRONG" : "MAX";
+
+    const dWord =
+      this._danger < 0.18 ? "" :
+      this._danger < 0.5 ? " • pressure rising" :
+      this._danger < 0.8 ? " • DO NOT TURN AROUND" :
+      " • RUN";
+
+    this.hint.style.opacity = (this._danger > 0.6) ? "0.92" : "0.7";
+    this.hint.textContent = `Signal: ${sigWord}${dWord} • WASD move • Mouse look • E interact • TAB journal`;
+    // vignette intensity
+    const v = document.getElementById("vignette");
+    v.style.opacity = String(0.85 + this._danger*0.35);
   }
 }
 
-function escapeHtml(s){
-  return (s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
-  }[c]));
-}
