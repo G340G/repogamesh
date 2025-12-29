@@ -1,101 +1,124 @@
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+import * as THREE from "three";
+import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 import { clamp } from "./utils.js";
 
-export class Player{
-  constructor(camera, controls){
+export class Player {
+  constructor({ THREE, camera, domElement, world }){
     this.camera = camera;
-    this.controls = controls;
+    this.domElement = domElement;
+    this.world = world;
 
-    this.vel = new THREE.Vector3();
-    this.dir = new THREE.Vector3();
+    this.controls = new PointerLockControls(camera, domElement);
 
-    this.breath = 1.0;   // stamina
-    this.fear = 0.0;
+    this.velocity = new THREE.Vector3();
+    this.direction = new THREE.Vector3();
+    this.position = new THREE.Vector3();
+
+    this.move = { f:0, b:0, l:0, r:0, sprint:false };
+    this.enabled = false;
 
     this.speedWalk = 3.2;
-    this.speedRun = 5.1;
-    this.drag = 8.0;
+    this.speedSprint = 5.2;
 
-    this.keys = new Set();
-    this.onGround = true;
+    this.radius = 0.38;
+    this.eyeHeight = 1.65;
 
-    this._stepTimer = 0;
+    this._bind();
   }
 
-  setSensitivity(mult){
-    this.controls.pointerSpeed = mult;
-  }
-
-  handleKey(e, down){
-    const k = e.code;
-    if (down) this.keys.add(k);
-    else this.keys.delete(k);
-  }
-
-  get position(){
-    return this.controls.getObject().position;
-  }
-
-  update(dt, audio){
-    const forward = (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0);
-    const strafe  = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0);
-
-    const sprint = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
-    const wantsRun = sprint && this.breath > 0.08;
-
-    const speed = wantsRun ? this.speedRun : this.speedWalk;
-
-    // stamina drain/regen
-    if (wantsRun && (forward !== 0 || strafe !== 0)){
-      this.breath = clamp(this.breath - dt*0.28, 0, 1);
-    } else {
-      this.breath = clamp(this.breath + dt*0.18, 0, 1);
-    }
-
-    this.dir.set(strafe, 0, forward);
-    if (this.dir.lengthSq() > 0) this.dir.normalize();
-
-    // convert to world direction
-    const obj = this.controls.getObject();
-    const yaw = obj.rotation.y;
-    const cos = Math.cos(yaw), sin = Math.sin(yaw);
-    const dx = this.dir.x * cos - this.dir.z * sin;
-    const dz = this.dir.x * sin + this.dir.z * cos;
-
-    const accel = 18.0;
-    this.vel.x += dx * accel * dt;
-    this.vel.z += dz * accel * dt;
-
-    // drag
-    this.vel.x -= this.vel.x * this.drag * dt;
-    this.vel.z -= this.vel.z * this.drag * dt;
-
-    // clamp velocity
-    const maxV = speed;
-    const hv = Math.hypot(this.vel.x, this.vel.z);
-    if (hv > maxV){
-      const s = maxV / hv;
-      this.vel.x *= s;
-      this.vel.z *= s;
-    }
-
-    // move
-    obj.position.x += this.vel.x * dt;
-    obj.position.z += this.vel.z * dt;
-
-    // keep camera height stable (simple ground lock; world is mostly flat + slight noise)
-    obj.position.y = 1.7;
-
-    // footsteps
-    const moving = hv > 0.45;
-    if (moving){
-      this._stepTimer -= dt * (wantsRun ? 1.8 : 1.0);
-      if (this._stepTimer <= 0){
-        this._stepTimer = wantsRun ? 0.28 : 0.42;
-        audio?.footstep(wantsRun ? 0.9 : 0.55);
+  _bind(){
+    const onKey = (e, v)=>{
+      switch(e.code){
+        case "KeyW": this.move.f = v; break;
+        case "KeyS": this.move.b = v; break;
+        case "KeyA": this.move.l = v; break;
+        case "KeyD": this.move.r = v; break;
+        case "ShiftLeft":
+        case "ShiftRight": this.move.sprint = !!v; break;
       }
-    } else {
-      this._stepTimer = 0;
+    };
+
+    window.addEventListener("keydown", (e)=> onKey(e, 1));
+    window.addEventListener("keyup", (e)=> onKey(e, 0));
+  }
+
+  enablePointerLock(){
+    this.domElement.requestPointerLock?.();
+    this.enabled = true;
+  }
+
+  disablePointerLock(){
+    document.exitPointerLock?.();
+    this.enabled = false;
+  }
+
+  teleport(pos, yaw=0){
+    this.position.copy(pos);
+    this.camera.position.copy(pos);
+    this.camera.position.y = pos.y;
+    this.camera.rotation.set(0, yaw, 0);
+  }
+
+  getPosition(){
+    return this.position.clone();
+  }
+
+  update(dt){
+    // pointer lock state
+    const locked = document.pointerLockElement === this.domElement;
+    if (!locked) {
+      // keep camera aligned with last position
+      this.camera.position.copy(this.position);
+      this.camera.position.y = this.eyeHeight;
+      return;
     }
+
+    const speed = (this.move.sprint ? this.speedSprint : this.speedWalk);
+
+    this.direction.set(
+      this.move.r - this.move.l,
+      0,
+      this.move.b - this.move.f
+    );
+
+    if (this.direction.lengthSq() > 0){
+      this.direction.normalize();
+    }
+
+    // move relative to camera yaw
+    const yaw = this.camera.rotation.y;
+    const cos = Math.cos(yaw), sin = Math.sin(yaw);
+    const dx = this.direction.x * cos - this.direction.z * sin;
+    const dz = this.direction.x * sin + this.direction.z * cos;
+
+    // acceleration
+    const accel = 14.0;
+    this.velocity.x += dx * accel * dt * speed;
+    this.velocity.z += dz * accel * dt * speed;
+
+    // damping
+    const damping = 10.0;
+    this.velocity.x *= Math.exp(-damping * dt);
+    this.velocity.z *= Math.exp(-damping * dt);
+
+    // step
+    const next = this.position.clone();
+    next.x += this.velocity.x * dt;
+    next.z += this.velocity.z * dt;
+    next.y = this.eyeHeight;
+
+    // collision
+    const resolved = this.world.resolveCollision(next, this.radius);
+    this.position.copy(resolved);
+
+    // apply
+    this.camera.position.copy(this.position);
+    this.camera.position.y = this.eyeHeight;
+
+    // subtle head bob
+    const moveAmt = clamp(Math.hypot(this.velocity.x, this.velocity.z) / 3.0, 0, 1);
+    const t = performance.now() * 0.002;
+    this.camera.position.y = this.eyeHeight + (Math.sin(t*6.5) * 0.03 * moveAmt);
   }
 }
+
