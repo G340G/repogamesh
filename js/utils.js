@@ -1,39 +1,47 @@
-export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-export const lerp = (a, b, t) => a + (b - a) * t;
+export const TAU = Math.PI * 2;
 
-export function rand(min=0, max=1){ return min + Math.random() * (max - min); }
-export function randi(min, max){ return Math.floor(rand(min, max+1)); }
-export function pick(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+export function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+export function lerp(a, b, t){ return a + (b - a) * t; }
+export function smoothstep(t){ return t * t * (3 - 2*t); }
 
-export function smoothstep(edge0, edge1, x){
-  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-  return t*t*(3 - 2*t);
+export function hashStringToSeed(str){
+  // deterministic 32-bit seed from string
+  let h = 2166136261 >>> 0; // FNV-1a base
+  for (let i = 0; i < str.length; i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+export function mulberry32(seed){
+  let a = seed >>> 0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function randRange(rng, a, b){ return a + (b - a) * rng(); }
+export function randi(rng, a, b){ return Math.floor(randRange(rng, a, b + 1)); }
+export function pick(rng, arr){ return arr[Math.floor(rng() * arr.length)]; }
+
+export function dist2(a, b){
+  const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+  return dx*dx + dy*dy + dz*dz;
 }
 
 export function now(){ return performance.now() / 1000; }
 
-export function hashString(s){
-  // stable-ish seed from string
-  let h = 2166136261;
-  for (let i=0;i<s.length;i++){
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0);
+export function fmtTitle(s){
+  return (s || "").replace(/\s+/g, " ").trim();
 }
 
-export function seededRand(seed){
-  // mulberry32
-  let t = seed >>> 0;
-  return function(){
-    t += 0x6D2B79F5;
-    let x = Math.imul(t ^ (t >>> 15), 1 | t);
-    x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
-    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
-  };
+export function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+export function isMobile(){
+  return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-export function setElText(id, text){
-  const el = document.getElementById(id);
-  if (el) el.textContent = text;
-}
