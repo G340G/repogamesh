@@ -3,57 +3,56 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>FOUNDATION / Daughter Protocol</title>
+  <title>ASHFIELD: Daughter Signal</title>
+  <meta name="description" content="A fogbound town. A missing daughter. Something that doesn't blink." />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <div id="hud">
-    <div id="topbar">
-      <div id="title">FOUNDATION</div>
-      <div id="objective">Objective: <span id="objectiveText">Find your daughter.</span></div>
-    </div>
+  <div id="app">
+    <canvas id="c"></canvas>
 
-    <div id="hint">Click to begin • WASD move • Mouse look • E interact • TAB journal</div>
+    <div id="hud">
+      <div id="title">ASHFIELD</div>
+      <div id="subtitle">Daughter Signal</div>
 
-    <div id="reticle">+</div>
+      <div id="crosshair" aria-hidden="true"></div>
 
-    <div id="prompt" class="hidden">
-      <div class="promptKey">E</div>
-      <div class="promptText" id="promptText">Interact</div>
-    </div>
+      <div id="prompt" class="panel hidden"></div>
 
-    <div id="dialogue" class="hidden">
-      <div id="dialogueHeader">
-        <div id="speaker">…</div>
-        <div id="sig">Signal: WEAK</div>
+      <div id="dialogue" class="panel hidden">
+        <div id="dialogue-speaker"></div>
+        <div id="dialogue-text"></div>
+        <div id="dialogue-hint">[E] next · [Q] close</div>
       </div>
-      <div id="dialogueBody"></div>
-      <div id="dialogueChoices"></div>
-      <div id="dialogueFooter">[1–9] choose • [Esc] close</div>
-    </div>
 
-    <div id="journal" class="hidden">
-      <div id="journalHeader">
-        <div>Journal</div>
-        <div class="tiny" id="journalTheme">Theme: —</div>
+      <div id="status" class="panel">
+        <div><span class="k">Objective</span>: <span id="objective">Find a trace of your daughter.</span></div>
+        <div><span class="k">Theme</span>: <span id="theme">…</span></div>
+        <div><span class="k">Clues</span>: <span id="clues">0</span>/5</div>
       </div>
-      <div id="journalBody"></div>
-      <div id="journalFooter">[TAB] close</div>
-    </div>
 
-    <div id="fade"></div>
-    <div id="grain"></div>
-    <div id="vignette"></div>
+      <div id="menu" class="panel">
+        <div class="menu-title">ASHFIELD: Daughter Signal</div>
+        <div class="menu-sub">Fog, isolation, slow dread. Explore. Read. Listen.</div>
+        <button id="btnStart">Start</button>
+        <button id="btnReset">New Theme</button>
+        <div class="menu-foot">
+          <div class="small">
+            Controls: WASD move · Mouse look · Shift sprint · E interact · Q close text · Esc unlock mouse
+          </div>
+        </div>
+      </div>
+
+      <div id="fade"></div>
+    </div>
   </div>
 
-  <canvas id="c"></canvas>
-
-  <!-- Import map fixes "bare specifier" errors on GitHub Pages -->
+  <!-- Import map fixes the "bare specifier 'three'" problem on GitHub Pages -->
   <script type="importmap">
     {
       "imports": {
-        "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
       }
     }
   </script>
