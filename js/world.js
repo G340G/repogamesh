@@ -1,457 +1,568 @@
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
-import { clamp, pick, rand, randi, smoothstep, seededRand, hashString } from "./utils.js";
-import { fetchWikimediaRandomImageUrl } from "./fetchers.js";
+import * as THREE from "three";
+import { clamp, hashStringToSeed, mulberry32, smoothstep } from "./utils.js";
 
-export class World{
-  constructor(renderer, scene){
-    this.renderer = renderer;
-    this.scene = scene;
-
-    this.size = 140; // town radius-ish
-    this.seedName = "ASHFIELD";
-    this.rng = Math.random;
-
-    this.fogDensity = 0.95;
-
-    this.assets = {
-      groundTex: null,
-      wallTex: null,
-      signTex: null
-    };
-
-    this.interactables = []; // { mesh, kind, data }
-    this.lights = [];
-    this.spawnPoints = [];
-
-    this._tmp = new THREE.Vector3();
-  }
-
-  setFogDensity(v){
-    this.fogDensity = v;
-    // exponential fog (denser = shorter distance)
-    const d = clamp(v, 0.2, 1.4);
-    this.scene.fog.density = 0.0105 * d;
-  }
-
-  async init(theme){
-    this.seedName = theme.themeName || "ASHFIELD";
-    this.rng = seededRand(hashString(this.seedName));
-
-    // fog & background color grade (yellowed, sickly)
-    this.scene.background = new THREE.Color(0x0b0a09);
-    this.scene.fog = new THREE.FogExp2(0x0b0a09, 0.0105 * this.fogDensity);
-
-    // subtle ambient
-    this.scene.add(new THREE.AmbientLight(0x6b5c44, 0.18));
-
-    // "moon" key light
-    const moon = new THREE.DirectionalLight(0xc7b58a, 0.85);
-    moon.position.set(-18, 34, -22);
-    moon.castShadow = true;
-    moon.shadow.mapSize.set(1024, 1024);
-    moon.shadow.camera.near = 1;
-    moon.shadow.camera.far = 120;
-    moon.shadow.camera.left = -50;
-    moon.shadow.camera.right = 50;
-    moon.shadow.camera.top = 50;
-    moon.shadow.camera.bottom = -50;
-    this.scene.add(moon);
-
-    // fetch textures (random) with fallbacks
-    await this._loadTextures();
-
-    // build terrain/roads/town
-    this._buildGround();
-    this._buildRoads();
-    this._buildTown(theme);
-
-    // boundary fog walls
-    this._addFogCurtain();
-
-    // spawn points
-    this.spawnPoints = [
-      new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(-22, 0, 18),
-      new THREE.Vector3(30, 0, -26),
-      new THREE.Vector3(12, 0, 44)
-    ];
-  }
-
-  async _loadTextures(){
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin("anonymous");
-
-    const makeFallback = (kind) => {
-      const c = document.createElement("canvas");
-      c.width = 256; c.height = 256;
-      const g = c.getContext("2d");
-
-      // grimy procedural
-      g.fillStyle = "#15120f"; g.fillRect(0,0,256,256);
-      for (let i=0;i<2200;i++){
-        const x = Math.random()*256, y=Math.random()*256;
-        const a = Math.random()*0.18;
-        g.fillStyle = `rgba(230,215,180,${a})`;
-        g.fillRect(x,y,1+Math.random()*2,1+Math.random()*2);
-      }
-      // cracks
-      g.strokeStyle = "rgba(0,0,0,.35)";
-      for (let i=0;i<18;i++){
-        g.beginPath();
-        g.moveTo(Math.random()*256, Math.random()*256);
-        for (let k=0;k<6;k++){
-          g.lineTo(Math.random()*256, Math.random()*256);
-        }
-        g.stroke();
-      }
-
-      const tex = new THREE.CanvasTexture(c);
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      tex.repeat.set(kind==="ground" ? 22 : 3, kind==="ground" ? 22 : 3);
-      tex.anisotropy = 4;
-      return tex;
-    };
-
-    const tryLoad = async (kind) => {
-      try{
-        const url = await fetchWikimediaRandomImageUrl();
-        const tex = await new Promise((resolve, reject) => {
-          loader.load(url, resolve, undefined, reject);
-        });
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(kind==="ground" ? 18 : 2, kind==="ground" ? 18 : 2);
-        tex.anisotropy = 4;
-        tex.colorSpace = THREE.SRGBColorSpace;
-        return tex;
-      }catch{
-        return makeFallback(kind);
-      }
-    };
-
-    // These are intentionally different random images each run
-    this.assets.groundTex = await tryLoad("ground");
-    this.assets.wallTex = await tryLoad("wall");
-    this.assets.signTex = await tryLoad("sign");
-  }
-
-  _buildGround(){
-    const geo = new THREE.PlaneGeometry(this.size*2, this.size*2, 64, 64);
-    geo.rotateX(-Math.PI/2);
-
-    // mild displacement
-    const pos = geo.attributes.position;
-    for (let i=0;i<pos.count;i++){
-      const x = pos.getX(i), z = pos.getZ(i);
-      const n = (Math.sin(x*0.06) + Math.cos(z*0.05) + Math.sin((x+z)*0.035))*0.35;
-      pos.setY(i, n * 0.25);
-    }
-    pos.needsUpdate = true;
-    geo.computeVertexNormals();
-
-    const mat = new THREE.MeshStandardMaterial({
-      map: this.assets.groundTex,
-      roughness: 1.0,
-      metalness: 0.0,
-      color: 0x6c5a3c
-    });
-
-    const ground = new THREE.Mesh(geo, mat);
-    ground.receiveShadow = true;
-    this.scene.add(ground);
-  }
-
-  _buildRoads(){
-    // simple cracked road strips
-    const roadMat = new THREE.MeshStandardMaterial({
-      color: 0x2a2621,
-      roughness: 1.0,
-      metalness: 0.0
-    });
-
-    const addRoad = (x,z,w,h,rot=0) => {
-      const g = new THREE.PlaneGeometry(w, h, 1, 1);
-      g.rotateX(-Math.PI/2);
-      const m = new THREE.Mesh(g, roadMat);
-      m.position.set(x, 0.02, z);
-      m.rotation.y = rot;
-      m.receiveShadow = true;
-      this.scene.add(m);
-    };
-
-    addRoad(0, 0, 10, 120, 0);
-    addRoad(-18, 10, 9, 90, 0.15);
-    addRoad(24, -14, 8, 80, -0.18);
-    addRoad(0, 26, 56, 10, 0.03);
-    addRoad(-6, -30, 52, 9, -0.06);
-  }
-
-  _buildTown(theme){
-    // clusters of buildings
-    const blocks = [
-      { cx:-16, cz:18, n:10 },
-      { cx:18, cz:-14, n:9 },
-      { cx:6, cz:36, n:8 }
-    ];
-
-    blocks.forEach(b => {
-      for (let i=0;i<b.n;i++){
-        const x = b.cx + rand(-18, 18);
-        const z = b.cz + rand(-18, 18);
-        this._addBuilding(x,z, theme);
-      }
-    });
-
-    // forest ring
-    for (let i=0;i<220;i++){
-      const ang = this.rng()*Math.PI*2;
-      const r = 48 + this.rng()*74;
-      const x = Math.cos(ang)*r + rand(-4,4);
-      const z = Math.sin(ang)*r + rand(-4,4);
-      if (Math.abs(x) < 12 && Math.abs(z) < 12) continue;
-      this._addTree(x, z);
-    }
-
-    // interactables: notes + a "signal" location
-    this._addInteractableSign(8, 0, -12, `ASHFIELD / ${theme.base.toUpperCase()}`);
-    this._addNotePickup(-22, 0, 16);
-    this._addNotePickup(26, 0, -22);
-    this._addNotePickup(10, 0, 42);
-
-    // the "daughter" beacon (end condition)
-    this._addBeaconHouse(-34, 0, -6);
-  }
-
-  _addBuilding(x,z, theme){
-    const w = rand(4.2, 8.6);
-    const h = rand(3.8, 8.8);
-    const d = rand(4.2, 8.6);
-
-    const geo = new THREE.BoxGeometry(w, h, d);
-    const mat = new THREE.MeshStandardMaterial({
-      map: this.assets.wallTex,
-      roughness: 0.95,
-      metalness: 0.0,
-      color: 0x7a6748
-    });
-
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(x, h/2, z);
-    m.rotation.y = rand(-0.4, 0.4);
-    m.castShadow = true;
-    m.receiveShadow = true;
-
-    // make them feel abandoned: missing chunks via dark “void windows”
-    const winCount = randi(2, 6);
-    const winGeo = new THREE.PlaneGeometry(0.9, 1.1);
-    const winMat = new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 1.0 });
-    for (let i=0;i<winCount;i++){
-      const wmesh = new THREE.Mesh(winGeo, winMat);
-      wmesh.position.set(rand(-w/2+0.7, w/2-0.7), rand(h*0.25, h*0.8), d/2 + 0.01);
-      wmesh.rotation.y = 0;
-      m.add(wmesh);
-    }
-
-    // occasional streetlamp
-    if (Math.random() < 0.18){
-      this._addLamp(x + rand(-4,4), z + rand(-4,4));
-    }
-
-    this.scene.add(m);
-  }
-
-  _addTree(x,z){
-    const trunkGeo = new THREE.CylinderGeometry(0.12, 0.18, rand(2.6, 4.2), 8);
-    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1.0 });
-    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-    trunk.position.set(x, 1.6, z);
-    trunk.castShadow = true;
-
-    const crownGeo = new THREE.ConeGeometry(rand(0.8, 1.6), rand(2.6, 4.4), 10);
-    const crownMat = new THREE.MeshStandardMaterial({ color: 0x0f120f, roughness: 1.0 });
-    const crown = new THREE.Mesh(crownGeo, crownMat);
-    crown.position.set(0, rand(2.8, 3.8), 0);
-    crown.castShadow = true;
-
-    trunk.add(crown);
-    this.scene.add(trunk);
-  }
-
-  _addLamp(x,z){
-    const pole = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.05, 0.08, 3.2, 8),
-      new THREE.MeshStandardMaterial({ color: 0x2a2621, roughness: 1.0 })
-    );
-    pole.position.set(x, 1.6, z);
-    pole.castShadow = true;
-
-    const bulb = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 10, 10),
-      new THREE.MeshStandardMaterial({ emissive: 0xffd7a0, emissiveIntensity: 1.0, color: 0x222222 })
-    );
-    bulb.position.set(0, 1.55, 0);
-    pole.add(bulb);
-
-    const light = new THREE.PointLight(0xffd7a0, 1.0, 12, 2.2);
-    light.position.set(x, 3.1, z);
-    light.castShadow = true;
-
-    this.scene.add(pole);
-    this.scene.add(light);
-    this.lights.push(light);
-  }
-
-  _addInteractableSign(x,y,z, text){
-    const canvas = document.createElement("canvas");
-    canvas.width = 512; canvas.height = 256;
-    const g = canvas.getContext("2d");
-    g.fillStyle = "#0e0c0a"; g.fillRect(0,0,512,256);
-    g.globalAlpha = 0.45;
-    // use random sign texture as grimy overlay
-    g.fillStyle = g.createPattern(canvasNoisePattern(), "repeat");
-    g.fillRect(0,0,512,256);
-    g.globalAlpha = 1;
-
-    g.strokeStyle = "rgba(255,255,255,.18)";
-    g.strokeRect(16,16,480,224);
-
-    g.fillStyle = "rgba(220,205,170,.92)";
-    g.font = "28px ui-monospace, Menlo, Consolas, monospace";
-    wrapText(g, text, 30, 70, 450, 34);
-    g.font = "16px ui-monospace, Menlo, Consolas, monospace";
-    g.fillStyle = "rgba(220,205,170,.70)";
-    g.fillText("SPEED LIMIT: MEMORY", 30, 210);
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-
-    const sign = new THREE.Mesh(
-      new THREE.PlaneGeometry(6.2, 3.2),
-      new THREE.MeshStandardMaterial({ map: tex, roughness: 0.9, metalness: 0.0 })
-    );
-    sign.position.set(x, 1.6, z);
-    sign.rotation.y = rand(-0.4, 0.4);
-    sign.castShadow = true;
-
-    this.scene.add(sign);
-
-    this.interactables.push({
-      mesh: sign,
-      kind: "sign",
-      data: { text: "The sign is cold. The paint looks wet, but it flakes like skin." }
-    });
-  }
-
-  _addNotePickup(x,y,z){
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(0.4, 0.08, 0.26),
-      new THREE.MeshStandardMaterial({ color: 0xb9ac90, roughness: 1.0 })
-    );
-    m.position.set(x, 0.12, z);
-    m.castShadow = true;
-    this.scene.add(m);
-
-    this.interactables.push({
-      mesh: m,
-      kind: "note",
-      data: { taken:false }
-    });
-  }
-
-  _addBeaconHouse(x,y,z){
-    // a distinct “manor” silhouette
-    const w=12, h=7.5, d=9;
-    const mat = new THREE.MeshStandardMaterial({ map:this.assets.wallTex, roughness:0.95, color:0x6f5b3e });
-    const base = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
-    base.position.set(x, h/2, z);
-    base.castShadow = true; base.receiveShadow=true;
-
-    const roof = new THREE.Mesh(
-      new THREE.ConeGeometry(8, 4.2, 4),
-      new THREE.MeshStandardMaterial({ color:0x2a2320, roughness:1.0 })
-    );
-    roof.position.set(0, h/2 + 2.1, 0);
-    roof.rotation.y = Math.PI/4;
-    roof.castShadow = true;
-    base.add(roof);
-
-    // faint interior light to pull player
-    const inner = new THREE.PointLight(0xffd7a0, 0.7, 18, 2.0);
-    inner.position.set(x+1.2, 2.2, z-1.3);
-    this.scene.add(inner);
-
-    this.scene.add(base);
-
-    this.interactables.push({
-      mesh: base,
-      kind: "beacon",
-      data: { reached:false }
-    });
-  }
-
-  _addFogCurtain(){
-    // invisible boundary helper: nothing rendered, but we clamp player to bounds
-  }
-
-  projectToTownBounds(v){
-    const r = this.size * 0.92;
-    const len = Math.hypot(v.x, v.z);
-    if (len > r){
-      const s = r / len;
-      v.x *= s; v.z *= s;
-    }
-  }
-
-  raycastInteract(camera, raycaster){
-    raycaster.setFromCamera({ x:0, y:0 }, camera);
-    const meshes = this.interactables.map(i => i.mesh);
-    const hits = raycaster.intersectObjects(meshes, true);
-    if (!hits.length) return null;
-
-    // find top-level interactable (walk up parent chain)
-    const hitObj = hits[0].object;
-    let found = null;
-    for (const it of this.interactables){
-      if (it.mesh === hitObj || it.mesh.children.includes(hitObj) || it.mesh === hitObj.parent || it.mesh === hitObj.parent?.parent){
-        found = it; break;
-      }
-      // fallback: check ancestry
-      let p = hitObj.parent;
-      while (p){
-        if (p === it.mesh){ found = it; break; }
-        p = p.parent;
-      }
-      if (found) break;
-    }
-    return found;
-  }
-}
-
-function wrapText(ctx, text, x, y, maxWidth, lineHeight){
-  const words = text.split(" ");
-  let line = "";
-  for (let n=0;n<words.length;n++){
-    const testLine = line + words[n] + " ";
-    const w = ctx.measureText(testLine).width;
-    if (w > maxWidth && n > 0){
-      ctx.fillText(line, x, y);
-      line = words[n] + " ";
-      y += lineHeight;
-    } else {
-      line = testLine;
-    }
-  }
-  ctx.fillText(line, x, y);
-}
-
-function canvasNoisePattern(){
+function makeCanvasTex(drawFn, size=512){
   const c = document.createElement("canvas");
-  c.width=64; c.height=64;
-  const g = c.getContext("2d");
-  g.fillStyle = "#0f0d0b"; g.fillRect(0,0,64,64);
-  for (let i=0;i<650;i++){
-    const a = Math.random()*0.12;
-    g.fillStyle = `rgba(230,215,180,${a})`;
-    g.fillRect(Math.random()*64, Math.random()*64, 1, 1);
-  }
-  return c;
+  c.width = c.height = size;
+  const ctx = c.getContext("2d");
+  drawFn(ctx, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 4;
+  return tex;
 }
+
+function desaturateTint(ctx, w, h, tint="#a7926a"){
+  ctx.save();
+  ctx.globalCompositeOperation = "source-atop";
+  ctx.fillStyle = tint;
+  ctx.globalAlpha = 0.12;
+  ctx.fillRect(0,0,w,h);
+  ctx.restore();
+}
+
+function groundTexture(seed){
+  const rng = mulberry32(seed);
+  return makeCanvasTex((ctx, S)=>{
+    ctx.fillStyle = "#101010";
+    ctx.fillRect(0,0,S,S);
+
+    // dirt layers
+    for(let i=0;i<18000;i++){
+      const x = rng()*S, y = rng()*S;
+      const a = rng();
+      const r = 0.5 + rng()*1.8;
+      const g = ctx.createRadialGradient(x,y,0,x,y,r*3);
+      const base = 18 + Math.floor(rng()*26);
+      g.addColorStop(0, `rgba(${base},${base-2},${base-3},${0.22*a})`);
+      g.addColorStop(1, `rgba(0,0,0,0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x,y,r*3,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    // cracks
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 1;
+    for(let i=0;i<240;i++){
+      let x = rng()*S, y = rng()*S;
+      ctx.beginPath();
+      ctx.moveTo(x,y);
+      const steps = 8 + Math.floor(rng()*16);
+      for(let k=0;k<steps;k++){
+        x += (rng()-0.5)*36;
+        y += (rng()-0.5)*36;
+        ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    desaturateTint(ctx,S,S,"#c2a57a");
+  }, 512);
+}
+
+function wallTexture(seed, motifText=""){
+  const rng = mulberry32(seed);
+  return makeCanvasTex((ctx, S)=>{
+    ctx.fillStyle = "#23201b";
+    ctx.fillRect(0,0,S,S);
+
+    // plaster
+    for(let i=0;i<12000;i++){
+      const x = rng()*S, y = rng()*S;
+      const w = 1+rng()*3, h = 1+rng()*3;
+      const v = 26 + Math.floor(rng()*40);
+      ctx.fillStyle = `rgba(${v},${v-2},${v-6},${0.10 + rng()*0.18})`;
+      ctx.fillRect(x,y,w,h);
+    }
+
+    // stains
+    for(let i=0;i<90;i++){
+      const x = rng()*S, y = rng()*S;
+      const r = 30 + rng()*90;
+      const g = ctx.createRadialGradient(x,y,0,x,y,r);
+      g.addColorStop(0, `rgba(10,10,10,${0.30 + rng()*0.25})`);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x,y,r,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    // faint “text imprint”
+    if (motifText){
+      ctx.save();
+      ctx.globalAlpha = 0.08;
+      ctx.fillStyle = "#f2ead8";
+      ctx.font = "28px ui-monospace, Menlo, Consolas, monospace";
+      for(let y=34;y<S;y+=48){
+        const line = motifText.slice(0, 44);
+        ctx.fillText(line, 16 + rng()*18, y);
+      }
+      ctx.restore();
+    }
+
+    desaturateTint(ctx,S,S,"#b79a6b");
+  }, 512);
+}
+
+function roadTexture(seed){
+  const rng = mulberry32(seed);
+  return makeCanvasTex((ctx, S)=>{
+    ctx.fillStyle = "#151515";
+    ctx.fillRect(0,0,S,S);
+
+    // asphalt speckle
+    for(let i=0;i<24000;i++){
+      const x=rng()*S, y=rng()*S;
+      const v = 20 + Math.floor(rng()*30);
+      ctx.fillStyle = `rgba(${v},${v},${v},${0.12 + rng()*0.22})`;
+      ctx.fillRect(x,y,1,1);
+    }
+
+    // worn center line
+    ctx.save();
+    ctx.translate(S/2, 0);
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = "#d4cbb4";
+    for(let y=0; y<S; y+=48){
+      const h = 22 + rng()*8;
+      ctx.fillRect(-5, y, 10, h);
+    }
+    ctx.restore();
+
+    desaturateTint(ctx,S,S,"#a0a0a0");
+  }, 512);
+}
+
+function makeFogBillboards({ seed, count=90, area=140 }){
+  const rng = mulberry32(seed);
+  const group = new THREE.Group();
+
+  const tex = makeCanvasTex((ctx,S)=>{
+    ctx.clearRect(0,0,S,S);
+    const g = ctx.createRadialGradient(S/2,S/2, 0, S/2,S/2, S*0.48);
+    g.addColorStop(0, "rgba(255,255,255,0.75)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(S/2,S/2,S*0.48,0,Math.PI*2);
+    ctx.fill();
+  }, 256);
+
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    color: 0xb7c2cf,
+    transparent: true,
+    opacity: 0.12,
+    depthWrite: false
+  });
+
+  for(let i=0;i<count;i++){
+    const s = new THREE.Sprite(mat.clone());
+    s.position.set((rng()-0.5)*area, 1.2 + rng()*6.5, (rng()-0.5)*area);
+    const sc = 14 + rng()*28;
+    s.scale.set(sc, sc, 1);
+    s.material.opacity = 0.07 + rng()*0.10;
+    s.userData.drift = { a: rng()*Math.PI*2, r: 0.3 + rng()*0.9, sp: 0.08 + rng()*0.18 };
+    group.add(s);
+  }
+
+  group.userData.isFog = true;
+  return group;
+}
+
+function makeTree(seed){
+  const rng = mulberry32(seed);
+  const g = new THREE.Group();
+
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.24, 2.2, 6),
+    new THREE.MeshStandardMaterial({ color: 0x1a1512, roughness: 0.95, metalness: 0.0 })
+  );
+  trunk.position.y = 1.1;
+  g.add(trunk);
+
+  const crown = new THREE.Mesh(
+    new THREE.ConeGeometry(0.9 + rng()*0.35, 2.1 + rng()*0.8, 7),
+    new THREE.MeshStandardMaterial({ color: 0x0f1412, roughness: 1.0, metalness: 0.0 })
+  );
+  crown.position.y = 2.4 + rng()*0.2;
+  crown.rotation.y = rng()*Math.PI;
+  g.add(crown);
+
+  g.userData.isTree = true;
+  return g;
+}
+
+function makeHouse({ seed, themeText }){
+  const rng = mulberry32(seed);
+  const group = new THREE.Group();
+
+  const wallTex = wallTexture(seed+11, themeText);
+  const matWall = new THREE.MeshStandardMaterial({
+    map: wallTex,
+    roughness: 0.98,
+    metalness: 0.0
+  });
+
+  const matRoof = new THREE.MeshStandardMaterial({
+    color: 0x1a1a1a,
+    roughness: 0.95,
+    metalness: 0.0
+  });
+
+  const base = new THREE.Mesh(new THREE.BoxGeometry(10, 5.6, 8), matWall);
+  base.position.set(0, 2.8, 0);
+  group.add(base);
+
+  const annex = new THREE.Mesh(new THREE.BoxGeometry(5.5, 3.6, 4.5), matWall);
+  annex.position.set(6.2, 1.8, 2.0);
+  group.add(annex);
+
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(6.2, 2.6, 4), matRoof);
+  roof.position.set(0, 6.5, 0);
+  roof.rotation.y = Math.PI*0.25;
+  group.add(roof);
+
+  // windows (dark voids)
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x030303, roughness: 1.0 });
+  for(let i=0;i<10;i++){
+    const w = 0.9 + rng()*0.6;
+    const h = 1.1 + rng()*0.7;
+    const win = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.15), winMat);
+    const side = rng() < 0.5 ? -1 : 1;
+    win.position.set(side*4.9 + (side*0.06), 2.0 + rng()*2.5, -2.8 + rng()*5.6);
+    win.rotation.y = side > 0 ? Math.PI/2 : -Math.PI/2;
+    group.add(win);
+  }
+
+  // door interactable
+  const door = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 0.12), new THREE.MeshStandardMaterial({
+    color: 0x0b0b0b,
+    roughness: 0.9
+  }));
+  door.position.set(5.01, 1.1, -0.6);
+  door.rotation.y = Math.PI/2;
+  door.userData = {
+    kind: "door",
+    locked: true,
+    open: false
+  };
+  group.add(door);
+
+  // faint interior light leak
+  const leak = new THREE.PointLight(0xffd7a3, 0.35, 7, 2.0);
+  leak.position.set(2.0, 2.2, 0.0);
+  leak.userData.flicker = true;
+  group.add(leak);
+
+  group.userData.isHouse = true;
+  group.userData.door = door;
+
+  return group;
+}
+
+function makeClue({ seed, title, body }){
+  const rng = mulberry32(seed);
+  const g = new THREE.Group();
+
+  const paper = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.7, 0.55),
+    new THREE.MeshStandardMaterial({
+      color: 0xd8d0be,
+      roughness: 0.92,
+      metalness: 0.0,
+      side: THREE.DoubleSide
+    })
+  );
+  paper.rotation.x = -Math.PI/2;
+  paper.position.y = 0.03;
+  g.add(paper);
+
+  const marker = new THREE.Mesh(
+    new THREE.BoxGeometry(0.06, 0.06, 0.06),
+    new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6 })
+  );
+  marker.position.set(0.22, 0.05, 0.15);
+  g.add(marker);
+
+  g.position.y = 0.03;
+  g.rotation.y = rng()*Math.PI;
+
+  g.userData = {
+    kind: "clue",
+    title,
+    body,
+    used: false
+  };
+
+  return g;
+}
+
+function makeTerminal(){
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(0.9, 1.1, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.9 })
+  );
+  base.position.y = 0.55;
+  g.add(base);
+
+  const screen = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.65, 0.42),
+    new THREE.MeshStandardMaterial({
+      color: 0x0b1012,
+      roughness: 0.7,
+      emissive: new THREE.Color(0x0c1f22),
+      emissiveIntensity: 0.9
+    })
+  );
+  screen.position.set(0, 0.76, 0.26);
+  g.add(screen);
+
+  const glow = new THREE.PointLight(0x86d7e2, 0.25, 5.0, 2.0);
+  glow.position.set(0, 0.8, 0.5);
+  g.add(glow);
+
+  g.userData = { kind: "terminal" };
+  return g;
+}
+
+export async function buildWorld({ THREE, scene, themePackage }){
+  const seed = hashStringToSeed(themePackage.theme || "FOUNDATION");
+  const rng = mulberry32(seed);
+
+  const world = {
+    seed,
+    rng,
+    interactables: [],
+    solids: [],
+    spawn: { position: new THREE.Vector3(0, 1.7, 22), yaw: Math.PI },
+    deepZone: { center: new THREE.Vector3(-36, 0, -44), r: 9.0 },
+    doorRef: null,
+    fogGroup: null,
+  };
+
+  // ground
+  const gTex = groundTexture(seed);
+  gTex.repeat.set(14, 14);
+  const groundMat = new THREE.MeshStandardMaterial({
+    map: gTex,
+    roughness: 1.0,
+    metalness: 0.0
+  });
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(220, 220, 1, 1), groundMat);
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = false;
+  scene.add(ground);
+
+  // road
+  const rTex = roadTexture(seed+3);
+  rTex.repeat.set(10, 1);
+  const roadMat = new THREE.MeshStandardMaterial({ map: rTex, roughness: 0.95 });
+  const road = new THREE.Mesh(new THREE.PlaneGeometry(140, 6.5), roadMat);
+  road.rotation.x = -Math.PI/2;
+  road.position.set(0, 0.01, -10);
+  scene.add(road);
+
+  // distant fog marker (deep zone)
+  const marker = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.25, 0.25, 3.5, 10),
+    new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0 })
+  );
+  marker.position.copy(world.deepZone.center).add(new THREE.Vector3(0, 1.75, 0));
+  scene.add(marker);
+
+  // house
+  const house = makeHouse({ seed: seed+19, themeText: themePackage.theme + " " + themePackage.text.slice(0,140) });
+  house.position.set(0, 0, -12);
+  house.rotation.y = 0.14;
+  scene.add(house);
+  world.solids.push({ type:"box", center:new THREE.Vector3(0,2.8,-12), size:new THREE.Vector3(10,5.6,8), yaw: house.rotation.y });
+  world.doorRef = house.userData.door;
+  world.interactables.push(world.doorRef);
+
+  // smaller building (shed)
+  const shedMat = new THREE.MeshStandardMaterial({ map: wallTexture(seed+55, themePackage.theme), roughness: 0.98 });
+  const shed = new THREE.Mesh(new THREE.BoxGeometry(5, 2.8, 4), shedMat);
+  shed.position.set(-16, 1.4, -24);
+  shed.rotation.y = -0.35;
+  scene.add(shed);
+  world.solids.push({ type:"box", center:shed.position.clone(), size:new THREE.Vector3(5,2.8,4), yaw: shed.rotation.y });
+
+  // terminal inside shed-ish
+  const terminal = makeTerminal();
+  terminal.position.set(-15.2, 0, -22.8);
+  terminal.rotation.y = 1.35;
+  scene.add(terminal);
+  world.interactables.push(terminal);
+
+  // clues
+  const clueTexts = [
+    {
+      title: `Photograph: "ROOM 4"`,
+      body: `A blurred image of a child standing in fog.\nOn the back: "IF YOU HEAR WATER IN THE WALLS, DO NOT ANSWER."`
+    },
+    {
+      title: `Note: "Signal Hygiene"`,
+      body: `Do not use names.\nNames let it pretend.\nUse DESCRIPTION ONLY.\n\n"The daughter" / "the voice" / "the thing".`
+    },
+    {
+      title: `Receipt: "Foundation Supplies"`,
+      body: `Coarse salt • magnet wire • wax • 11 small mirrors.\nThe total is circled twice.\nUnderlined: "DO NOT PLACE MIRRORS IN CORNERS".`
+    }
+  ];
+
+  for (let i=0;i<3;i++){
+    const c = makeClue({ seed: seed+100+i*7, ...clueTexts[i] });
+    const px = (i===0) ? 2.4 : (i===1 ? -14.6 : -6.0);
+    const pz = (i===0) ? -9.0 : (i===1 ? -24.4 : -18.6);
+    c.position.set(px, 0.02, pz);
+    scene.add(c);
+    world.interactables.push(c);
+  }
+
+  // forest ring
+  const forest = new THREE.Group();
+  for(let i=0;i<160;i++){
+    const t = makeTree(seed + 300 + i*13);
+    const ang = rng()*Math.PI*2;
+    const rad = 55 + rng()*55;
+    const x = Math.cos(ang)*rad;
+    const z = Math.sin(ang)*rad;
+    t.position.set(x, 0, z);
+    t.rotation.y = rng()*Math.PI*2;
+    const s = 0.85 + rng()*1.35;
+    t.scale.set(s, s, s);
+    forest.add(t);
+
+    // very rough collision for closer trees
+    if (rad < 85 && rng() < 0.35){
+      world.solids.push({ type:"cyl", center:new THREE.Vector3(x,0,z), r: 0.75*s, h: 2.4*s });
+    }
+  }
+  scene.add(forest);
+
+  // fog sprites
+  const fogGroup = makeFogBillboards({ seed: seed+777, count: 110, area: 170 });
+  scene.add(fogGroup);
+  world.fogGroup = fogGroup;
+
+  // helper functions
+  world.pickInteractable = (camera)=>{
+    // simple raycast from center
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(0,0), camera);
+    const hits = ray.intersectObjects(world.interactables, true)
+      .filter(h=> h.object?.visible !== false)
+      .slice(0, 1);
+    if (!hits.length) return null;
+    const obj = hits[0].object;
+    // bubble up until userData.kind exists
+    let o = obj;
+    while(o && !o.userData?.kind && o.parent) o = o.parent;
+    if (!o?.userData?.kind) return null;
+    if (hits[0].distance > 2.3) return null;
+    return o;
+  };
+
+  world.openDoor = (doorMesh)=>{
+    if (doorMesh.userData.open) return;
+    doorMesh.userData.open = true;
+    // animate over time via update()
+    doorMesh.userData._openT = 0;
+  };
+
+  world.reachedDeepZone = (pos)=>{
+    const d = pos.distanceTo(world.deepZone.center);
+    return d < world.deepZone.r;
+  };
+
+  world.update = (dt)=>{
+    // fog drift
+    if (world.fogGroup?.userData?.isFog){
+      for (const s of world.fogGroup.children){
+        const d = s.userData.drift;
+        if (!d) continue;
+        d.a += dt * d.sp;
+        s.position.x += Math.cos(d.a) * d.r * dt;
+        s.position.z += Math.sin(d.a) * d.r * dt;
+      }
+    }
+
+    // door animation
+    const door = world.doorRef;
+    if (door && door.userData.open && door.userData._openT < 1){
+      door.userData._openT = clamp(door.userData._openT + dt*0.9, 0, 1);
+      const t = smoothstep(0,1,door.userData._openT);
+      door.rotation.y = (Math.PI/2) + (-1.1 * t);
+      door.position.x = 5.01 + 0.45*t;
+    }
+  };
+
+  // collision: push out of solids
+  world.resolveCollision = (pos, radius=0.35)=>{
+    // simple: keep y stable
+    const p = pos.clone();
+
+    for (const s of world.solids){
+      if (s.type === "cyl"){
+        const dx = p.x - s.center.x;
+        const dz = p.z - s.center.z;
+        const dist = Math.hypot(dx, dz);
+        const minD = s.r + radius;
+        if (dist < minD){
+          const nx = dx / (dist || 1e-6);
+          const nz = dz / (dist || 1e-6);
+          p.x = s.center.x + nx*minD;
+          p.z = s.center.z + nz*minD;
+        }
+        continue;
+      }
+
+      // oriented box approx: rotate point into box space by -yaw
+      const yaw = s.yaw || 0;
+      const c = Math.cos(-yaw), si = Math.sin(-yaw);
+      const relx = p.x - s.center.x;
+      const relz = p.z - s.center.z;
+      const lx = relx*c - relz*si;
+      const lz = relx*si + relz*c;
+
+      const hx = s.size.x/2 + radius;
+      const hz = s.size.z/2 + radius;
+
+      if (Math.abs(lx) <= hx && Math.abs(lz) <= hz){
+        // push out along smallest penetration
+        const px = hx - Math.abs(lx);
+        const pz = hz - Math.abs(lz);
+
+        if (px < pz){
+          const sign = lx >= 0 ? 1 : -1;
+          const outx = (Math.abs(lx) + px) * sign;
+          // rotate back
+          const wx = outx*c + lz*si;
+          const wz = -outx*si + lz*c;
+          p.x = s.center.x + wx;
+          p.z = s.center.z + wz;
+        } else {
+          const sign = lz >= 0 ? 1 : -1;
+          const outz = (Math.abs(lz) + pz) * sign;
+          const wx = lx*c + outz*si;
+          const wz = -lx*si + outz*c;
+          p.x = s.center.x + wx;
+          p.z = s.center.z + wz;
+        }
+      }
+    }
+
+    return p;
+  };
+
+  return world;
+}
+
